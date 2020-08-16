@@ -6,6 +6,7 @@ use openssl::symm::Cipher;
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::Write;
+use indicatif::ProgressBar;
 
 extern crate ureq;
 extern crate clap;
@@ -20,7 +21,7 @@ fn main() -> Result<(), PageError> {
                 .about("Gets a list of download links from a show")
                 .arg(
                     Arg::with_name("SHOW")
-                        .help("the show to download")
+                        .help("the show to get links for")
                         .required(true)
                         .index(1)
                 )
@@ -31,6 +32,16 @@ fn main() -> Result<(), PageError> {
                 .arg(
                     Arg::with_name("SHOW")
                         .help("the show to download")
+                        .required(true)
+                        .index(1)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("size")
+                .about("Gets the size of a show")
+                .arg(
+                    Arg::with_name("SHOW")
+                        .help("the show to size")
                         .required(true)
                         .index(1)
                 )
@@ -54,6 +65,20 @@ fn main() -> Result<(), PageError> {
             println!("Downloading {}", e.0.as_str());
             download(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path())?;
         }
+    } else if let Some(submatch) = a.subcommand_matches("size") {
+        let show = submatch.value_of("SHOW").unwrap();
+        let list = get_show_downloads(show)?;
+        let mut size_acc = 0;
+        let bar = ProgressBar::new(list.len() as u64);
+        for e in list.iter()
+            .map(|v| v.1.as_str())
+            .enumerate()
+        {
+            bar.set_position(e.0 as u64 + 1);
+            size_acc += get_download_size(e.1)?;
+        }
+        bar.finish();
+        println!("Total: {}", size_to_string(size_acc))
     } else if a.subcommand_matches("list").is_some() {
         let list = get_show_list()?;
         for e in list.iter() {
@@ -61,6 +86,21 @@ fn main() -> Result<(), PageError> {
         }
     }
     Ok(())
+}
+
+fn size_to_string(n: usize) -> String {
+    let f = n as f64;
+    let sizes = ["", " KiB", " MiB", " GiB", " TiB", " PiB"];
+    let mut fsize = 1.;
+    let mut size_idx = 0;
+    loop {
+        let r = f / fsize;
+        if (r < 1024.) || (size_idx == (sizes.len() - 1)) {
+            break format!("{}{}", r as u32, sizes[size_idx]);
+        }
+        fsize *= 1024.;
+        size_idx += 1;
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +149,24 @@ fn download(url: &str, file: &Path) -> Result<(), PageError> {
     std::io::copy(&mut res.into_reader(), &mut f).map_err(|e| PageError::IoError(e))?;
     f.flush().map_err(|e| PageError::IoError(e))?;
     Ok(())
+}
+
+fn get_download_size(url: &str) -> Result<usize, PageError> {
+    let res = ureq::head(url)
+        .set("TE", "Trailers")
+        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:68.0) Gecko/20100101 Firefox/68.0")
+        .set("Referer", "https://twist.moe/")
+        .timeout_connect(5000)
+        .call();
+    if !res.ok() {
+        return Err(PageError::PageResponseError(res.status()))
+    }
+    let size_str = res.header("Content-Length")
+        .ok_or(PageError::ParseError("no content length"))?;
+    let size_num: usize = size_str
+        .parse()
+        .map_err(|_| PageError::ParseError("invalid content length"))?;
+    Ok(size_num)
 }
 
 fn get_show_downloads(url: &str) -> Result<Vec<(String, String)>, PageError> {
