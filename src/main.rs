@@ -5,8 +5,11 @@ use md5::Context;
 use openssl::symm::Cipher;
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::io::Write;
-use indicatif::ProgressBar;
+use std::io::{Write, Read};
+use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
+use std::mem::MaybeUninit;
+use indicatif::ProgressIterator;
+use std::thread::spawn;
 
 extern crate ureq;
 extern crate clap;
@@ -61,10 +64,19 @@ fn main() -> Result<(), PageError> {
     } else if let Some(submatch) = a.subcommand_matches("download") {
         let show = submatch.value_of("SHOW").unwrap();
         let list = get_show_downloads(show)?;
-        for e in list.iter() {
-            println!("Downloading {}", e.0.as_str());
-            download(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path())?;
-        }
+        let progress = MultiProgress::new();
+        let show_bar = ProgressBar::new(list.len() as u64);
+        progress.add(show_bar.clone());
+        show_bar.tick();
+        let file_bar = ProgressBar::new(1);
+        progress.add(file_bar.clone());
+        file_bar.tick();
+        spawn(move || {
+            for e in list.iter().progress_with(show_bar) {
+                download(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path(), file_bar.clone()).unwrap();
+            }
+        });
+        progress.join().unwrap();
     } else if let Some(submatch) = a.subcommand_matches("size") {
         let show = submatch.value_of("SHOW").unwrap();
         let list = get_show_downloads(show)?;
@@ -135,7 +147,7 @@ fn api_request(url: &str) -> Result<Value, PageError> {
     }
 }
 
-fn download(url: &str, file: &Path) -> Result<(), PageError> {
+fn download(url: &str, file: &Path, bar: ProgressBar) -> Result<(), PageError> {
     let res = ureq::get(url)
         .set("TE", "Trailers")
         .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:68.0) Gecko/20100101 Firefox/68.0")
@@ -145,8 +157,18 @@ fn download(url: &str, file: &Path) -> Result<(), PageError> {
     if !res.ok() {
         return Err(PageError::PageResponseError(res.status()))
     }
+    match res.header("Content-Length").and_then(|s| s.parse().ok()) {
+        Some(v) => {
+            bar.set_length(v);
+            bar.set_style(ProgressStyle::default_bar().template("{wide_bar} {bytes}/{total_bytes}"))
+        },
+        None => {
+            bar.set_length(!0);
+            bar.set_style(ProgressStyle::default_spinner())
+        }
+    }
     let mut f = File::create(file).map_err(|e| PageError::IoError(e))?;
-    std::io::copy(&mut res.into_reader(), &mut f).map_err(|e| PageError::IoError(e))?;
+    std::io::copy(&mut bar.wrap_read(res.into_reader()), &mut f).map_err(|e| PageError::IoError(e))?;
     f.flush().map_err(|e| PageError::IoError(e))?;
     Ok(())
 }
