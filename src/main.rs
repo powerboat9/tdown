@@ -5,9 +5,8 @@ use md5::Context;
 use openssl::symm::Cipher;
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::io::{Write, Read};
+use std::io::Write;
 use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
-use std::mem::MaybeUninit;
 use indicatif::ProgressIterator;
 use std::thread::spawn;
 
@@ -72,7 +71,7 @@ fn main() -> Result<(), PageError> {
         progress.add(file_bar.clone());
         file_bar.tick();
         spawn(move || {
-            for e in list.iter().progress_with(show_bar) {
+            for e in show_bar.wrap_iter(list.iter()) {
                 download(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path(), file_bar.clone()).unwrap();
             }
         });
@@ -167,6 +166,7 @@ fn download(url: &str, file: &Path, bar: ProgressBar) -> Result<(), PageError> {
             bar.set_style(ProgressStyle::default_spinner())
         }
     }
+    bar.set_position(0);
     let mut f = File::create(file).map_err(|e| PageError::IoError(e))?;
     std::io::copy(&mut bar.wrap_read(res.into_reader()), &mut f).map_err(|e| PageError::IoError(e))?;
     f.flush().map_err(|e| PageError::IoError(e))?;
