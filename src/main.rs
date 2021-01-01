@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::Write;
 use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
-use indicatif::ProgressIterator;
 use std::thread::spawn;
 
 extern crate ureq;
