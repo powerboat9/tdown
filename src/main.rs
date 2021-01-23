@@ -10,10 +10,8 @@ use std::time::Duration;
 use std::error::Error;
 use futures::AsyncWriteExt;
 use bytes::Buf;
-use reqwest::header::{HeaderName, ACCEPT, USER_AGENT, REFERER, HeaderMap};
-use reqwest::header::HOST;
+use reqwest::header::{USER_AGENT, REFERER};
 
-extern crate ureq;
 extern crate clap;
 extern crate tokio;
 
@@ -119,117 +117,6 @@ fn size_to_string(n: usize) -> String {
         size_idx += 1;
     }
 }
-
-#[derive(Debug)]
-enum PageError {
-}
-
-impl Display for PageError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.write_str("FOO")
-    }
-}
-
-impl std::error::Error for PageError {
-}
-
-/*
-fn api_request(url: &str) -> Result<Value, PageError> {
-    let r = ureq::get(url)
-        .set("x-access-token", "0df14814b9e590a1f26d3071a4ed7974")
-        .timeout_connect(5000)
-        .call();
-    if r.ok() {
-        r.into_json().map_err(|v| PageError::IoError(v))
-    } else {
-        Err(PageError::PageResponseError(r.status()))
-    }
-}
- */
-
-/*
-fn download(url: &str, file: &Path, bar: ProgressBar) -> Result<(), PageError> {
-    let res = ureq::get(url)
-        .set("TE", "Trailers")
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:68.0) Gecko/20100101 Firefox/68.0")
-        .set("Referer", "https://twist.moe/")
-        .timeout_connect(5000)
-        .call();
-    if !res.ok() {
-        return Err(PageError::PageResponseError(res.status()))
-    }
-    match res.header("Content-Length").and_then(|s| s.parse().ok()) {
-        Some(v) => {
-            bar.set_length(v);
-            bar.set_style(ProgressStyle::default_bar().template("{wide_bar} {bytes}/{total_bytes}"))
-        },
-        None => {
-            bar.set_length(!0);
-            bar.set_style(ProgressStyle::default_spinner())
-        }
-    }
-    bar.set_position(0);
-    let mut f = File::create(file).map_err(|e| PageError::IoError(e))?;
-    std::io::copy(&mut bar.wrap_read(res.into_reader()), &mut f).map_err(|e| PageError::IoError(e))?;
-    f.flush().map_err(|e| PageError::IoError(e))?;
-    Ok(())
-}
- */
-/*
-fn get_download_size(url: &str) -> Result<usize, PageError> {
-    let res = ureq::head(url)
-        .set("TE", "Trailers")
-        .set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:68.0) Gecko/20100101 Firefox/68.0")
-        .set("Referer", "https://twist.moe/")
-        .timeout_connect(5000)
-        .call();
-    if !res.ok() {
-        return Err(PageError::PageResponseError(res.status()))
-    }
-    let size_str = res.header("Content-Length")
-        .ok_or(PageError::ParseError("no content length"))?;
-    let size_num: usize = size_str
-        .parse()
-        .map_err(|_| PageError::ParseError("invalid content length"))?;
-    Ok(size_num)
-}
- */
-
-/*
-fn get_show_downloads(url: &str) -> Result<Vec<(String, String)>, PageError> {
-    let stub = {
-        let mut tmp = url;
-        if tmp.ends_with('/') {
-            tmp = &tmp[..(tmp.len() - 1)];
-        }
-        match tmp.rfind('/') {
-            Some(idx) => &tmp[(idx + 1)..],
-            None => tmp
-        }
-    };
-
-    let url = format!("https://twist.moe/api/anime/{}/sources", stub);
-    let data = api_request(url.as_str())?;
-
-    (|| {
-        let mut ls = Vec::new();
-        for ent in data.as_array()? {
-            let entv = ent.as_object()?;
-            let ob_source = entv.get("source")?.as_str()?;
-            let source = decrypt_source(ob_source).ok()?;
-            let file_name = {
-                match source.rfind('/') {
-                    Some(idx) => String::from(&source.as_str()[(idx + 1)..]),
-                    None => source.clone()
-                }
-            };
-            let quoted_source = format!("https://twistcdn.bunny.sh{}", urlencoding::encode(source.as_str()).replace("%2F", "/"));
-            ls.push((file_name, quoted_source));
-        }
-        Some(ls)
-    })().ok_or(PageError::ParseError("failed to parse json"))
-}
- */
 
 fn decrypt_source(s: &str) -> Result<String, TwistError> {
     // Decryption based on https://github.com/vn-ki/anime-downloader
