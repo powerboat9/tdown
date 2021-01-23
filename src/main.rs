@@ -10,6 +10,8 @@ use std::time::Duration;
 use std::error::Error;
 use futures::AsyncWriteExt;
 use bytes::Buf;
+use reqwest::header::{HeaderName, ACCEPT, USER_AGENT, REFERER, HeaderMap};
+use reqwest::header::HOST;
 
 extern crate ureq;
 extern crate clap;
@@ -295,7 +297,7 @@ impl Error for TwistError {
 impl TwistPort {
     fn new() -> Result<Self, TwistError> {
         Ok(TwistPort {
-            client: Client::builder().build().map_err(|e| TwistError::AccessError(e))?
+            client: Client::builder().referer(false).build().map_err(|e| TwistError::AccessError(e))?
         })
     }
 
@@ -326,8 +328,8 @@ impl TwistPort {
 
     async fn download_file(&self, url: &str, file: &Path, bar: ProgressBar) -> Result<(), TwistError> {
         let mut res = self.client.get(url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
-            .header("Referer", "https://twist.moe/")
+            .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
+            .header(REFERER, "https://twist.moe/")
             .timeout(Duration::from_secs(10))
             .send().await
             .and_then(|v| v.error_for_status())
@@ -356,8 +358,8 @@ impl TwistPort {
 
     async fn get_download_size(&self, url: &str) -> Result<usize, TwistError> {
         let res = self.client.head(url)
-            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
-            .header("Referer", "https://twist.moe/")
+            .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
+            .header(REFERER, "https://twist.moe/")
             .timeout(Duration::from_secs(10))
             .send().await
             .and_then(|v| v.error_for_status())
