@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 ureq = {version = "0.11.4", features = ["json"]}
+reqwest = {version = "0.11.0", features = ["json", "stream", "cookies"]}
 serde_json = "1.0.57"
 clap = "2.33.0"
 base64 = "0.12.3"
@@ -15,3 +16,8 @@ md5 = "0.7.0"
 openssl = {version = "0.10.30", features = ["vendored"]}
 urlencoding = "1.1.1"
 indicatif = "0.15.0"
+tokio = {version = "1.0.2", features = ["full"]}
+async-std = "1.9.0"
+mio = "0.7.7"
+futures = "0.3.12"
+bytes = "1.0.1"

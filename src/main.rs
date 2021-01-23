@@ -4,15 +4,19 @@ use serde_json::Value;
 use md5::Context;
 use openssl::symm::Cipher;
 use std::path::{Path, PathBuf};
-use std::fs::File;
-use std::io::Write;
 use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
-use std::thread::spawn;
+use reqwest::Client;
+use std::time::Duration;
+use std::error::Error;
+use futures::AsyncWriteExt;
+use bytes::Buf;
 
 extern crate ureq;
 extern crate clap;
+extern crate tokio;
 
-fn main() -> Result<(), PageError> {
+#[tokio::main]
+async fn main() -> Result<(), TwistError> {
     let a = App::new("Twist.moe Downloader")
         .version("1.0")
         .author("powerboat9")
@@ -55,13 +59,14 @@ fn main() -> Result<(), PageError> {
         .get_matches();
     if let Some(submatch) = a.subcommand_matches("get-links") {
         let show = submatch.value_of("SHOW").unwrap();
-        let list = get_show_downloads(show)?;
+        let list = TwistPort::new()?.get_show_downloads(show).await?;
         for e in list.iter() {
             println!("\"{}\": {}", e.0, e.1);
         }
     } else if let Some(submatch) = a.subcommand_matches("download") {
+        let port = TwistPort::new()?;
         let show = submatch.value_of("SHOW").unwrap();
-        let list = get_show_downloads(show)?;
+        let list = port.get_show_downloads(show).await?;
         let progress = MultiProgress::new();
         let show_bar = ProgressBar::new(list.len() as u64);
         progress.add(show_bar.clone());
@@ -69,15 +74,15 @@ fn main() -> Result<(), PageError> {
         let file_bar = ProgressBar::new(1);
         progress.add(file_bar.clone());
         file_bar.tick();
-        spawn(move || {
-            for e in show_bar.wrap_iter(list.iter()) {
-                download(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path(), file_bar.clone()).unwrap();
-            }
-        });
-        progress.join().unwrap();
+        for e in show_bar.wrap_iter(list.iter()) {
+            port.download_file(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path(), file_bar.clone()).await.unwrap();
+        }
+        file_bar.finish_and_clear();
+        show_bar.finish_and_clear();
     } else if let Some(submatch) = a.subcommand_matches("size") {
+        let port = TwistPort::new()?;
         let show = submatch.value_of("SHOW").unwrap();
-        let list = get_show_downloads(show)?;
+        let list = port.get_show_downloads(show).await?;
         let mut size_acc = 0;
         let bar = ProgressBar::new(list.len() as u64);
         for e in list.iter()
@@ -85,12 +90,12 @@ fn main() -> Result<(), PageError> {
             .enumerate()
         {
             bar.set_position(e.0 as u64 + 1);
-            size_acc += get_download_size(e.1)?;
+            size_acc += port.get_download_size(e.1).await?;
         }
         bar.finish();
         println!("Total: {}", size_to_string(size_acc))
     } else if a.subcommand_matches("list").is_some() {
-        let list = get_show_list()?;
+        let list = TwistPort::new()?.list_shows().await?;
         for e in list.iter() {
             println!("\"{}\": {}", e.0, e.1);
         }
@@ -115,24 +120,18 @@ fn size_to_string(n: usize) -> String {
 
 #[derive(Debug)]
 enum PageError {
-    PageResponseError(u16),
-    IoError(std::io::Error),
-    ParseError(&'static str)
 }
 
 impl Display for PageError {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        match self {
-            PageError::PageResponseError(c) => f.write_fmt(format_args!("Response Error: {}", c)),
-            PageError::IoError(e) => f.write_fmt(format_args!("IO Error: {}", e)),
-            PageError::ParseError(s) => f.write_fmt(format_args!("Parsing Failure: {}", *s))
-        }
+        f.write_str("FOO")
     }
 }
 
 impl std::error::Error for PageError {
 }
 
+/*
 fn api_request(url: &str) -> Result<Value, PageError> {
     let r = ureq::get(url)
         .set("x-access-token", "0df14814b9e590a1f26d3071a4ed7974")
@@ -144,7 +143,9 @@ fn api_request(url: &str) -> Result<Value, PageError> {
         Err(PageError::PageResponseError(r.status()))
     }
 }
+ */
 
+/*
 fn download(url: &str, file: &Path, bar: ProgressBar) -> Result<(), PageError> {
     let res = ureq::get(url)
         .set("TE", "Trailers")
@@ -171,7 +172,8 @@ fn download(url: &str, file: &Path, bar: ProgressBar) -> Result<(), PageError> {
     f.flush().map_err(|e| PageError::IoError(e))?;
     Ok(())
 }
-
+ */
+/*
 fn get_download_size(url: &str) -> Result<usize, PageError> {
     let res = ureq::head(url)
         .set("TE", "Trailers")
@@ -189,7 +191,9 @@ fn get_download_size(url: &str) -> Result<usize, PageError> {
         .map_err(|_| PageError::ParseError("invalid content length"))?;
     Ok(size_num)
 }
+ */
 
+/*
 fn get_show_downloads(url: &str) -> Result<Vec<(String, String)>, PageError> {
     let stub = {
         let mut tmp = url;
@@ -223,14 +227,15 @@ fn get_show_downloads(url: &str) -> Result<Vec<(String, String)>, PageError> {
         Some(ls)
     })().ok_or(PageError::ParseError("failed to parse json"))
 }
+ */
 
-fn decrypt_source(s: &str) -> Result<String, PageError> {
+fn decrypt_source(s: &str) -> Result<String, TwistError> {
     // Decryption based on https://github.com/vn-ki/anime-downloader
-    let dec = base64::decode(s).map_err(|_| PageError::ParseError("invalid base64 source"))?;
+    let dec = base64::decode(s).map_err(|_| TwistError::ParseError(String::from("invalid base64 source")))?;
     if dec.len() < 16 || !dec.as_slice().starts_with(b"Salted__") {
-        return Err(PageError::ParseError("invalid source format"));
+        return Err(TwistError::ParseError(String::from("invalid source format")));
     }
-    const PASSPHRASE: &[u8] = b"LXgIVP&PorO68Rq7dTx8N^lP!Fa5sGJ^*XK";
+    const PASSPHRASE: &[u8] = b"267041df55ca2b36f2e322d05ee2c9cf";
     let salt = &dec.as_slice()[8..16];
     // obtains key and iv
     fn bytes_to_key_iv(data: &[u8], salt: &[u8]) -> ([u8; 32], [u8; 16]) {
@@ -257,23 +262,160 @@ fn decrypt_source(s: &str) -> Result<String, PageError> {
         &key,
         Some(&iv),
         dec.as_slice().split_at(16).1
-    ).map_err(|_| PageError::ParseError("decrypt fail"))?;
+    ).map_err(|_| TwistError::ParseError(String::from("decrypt fail")))?;
     let unquoted = std::str::from_utf8(decrypted.as_slice())
-        .map_err(|_| PageError::ParseError("decrypt encoding fail"))?;
+        .map_err(|_| TwistError::ParseError(String::from("decrypt encoding fail")))?;
     Ok(String::from(unquoted))
 }
 
-fn get_show_list() -> Result<Vec<(String, String)>, PageError> {
-    let data = api_request("https://twist.moe/api/anime")?;
-    let mut ls = Vec::new();
-    let res: Option<_> = (|| {
-        for ent in data.as_array()? {
-            let ent_map = ent.as_object()?;
-            let name = String::from(ent_map.get("title")?.as_str()?);
-            let slug = ent_map.get("slug")?.as_object()?.get("slug")?.as_str()?;
-            ls.push((name, format!("https://twist.moe/a/{}", slug)));
+struct TwistPort {
+    client: Client
+}
+
+#[derive(Debug)]
+enum TwistError {
+    AccessError(reqwest::Error),
+    ParseError(String),
+    IOError(std::io::Error)
+}
+
+impl Display for TwistError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TwistError::AccessError(e) => f.write_fmt(format_args!("AccessError: {}", e)),
+            TwistError::ParseError(e) => f.write_fmt(format_args!("ParseError: {}", e)),
+            TwistError::IOError(e) => f.write_fmt(format_args!("IOError: {}", e))
         }
-        Some(ls)
-    })();
-    res.ok_or(PageError::ParseError("failed to manage json"))
+    }
+}
+
+impl Error for TwistError {
+}
+
+impl TwistPort {
+    fn new() -> Result<Self, TwistError> {
+        Ok(TwistPort {
+            client: Client::builder().build().map_err(|e| TwistError::AccessError(e))?
+        })
+    }
+
+    async fn raw_api_request(&self, url: &str) -> Result<Value, TwistError> {
+        async fn inner_no_retry(port: &TwistPort, url: &str) -> Result<Value, TwistError> {
+            Ok(port.client.get(url)
+                .header("x-access-token", "0df14814b9e590a1f26d3071a4ed7974")
+                .timeout(Duration::from_secs(10))
+                .send().await
+                .and_then(|v| v.error_for_status())
+                .map_err(|e| TwistError::AccessError(e))?
+                .json::<Value>().await.map_err(|e| TwistError::AccessError(e))?)
+        }
+        let mut i = 0;
+        loop {
+            match inner_no_retry(self, url).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    i += 1;
+                    eprintln!("[WARN] retry {} of 10 failed", i);
+                    if i == 10 {
+                        return Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn download_file(&self, url: &str, file: &Path, bar: ProgressBar) -> Result<(), TwistError> {
+        let mut res = self.client.get(url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
+            .header("Referer", "https://twist.moe/")
+            .timeout(Duration::from_secs(10))
+            .send().await
+            .and_then(|v| v.error_for_status())
+            .map_err(|e| TwistError::AccessError(e))?;
+        match res.headers().get("Content-Length")
+            .and_then(|s| s.to_str().ok())
+            .and_then(|s| s.parse().ok()) {
+            Some(v) => {
+                bar.set_length(v);
+                bar.set_style(ProgressStyle::default_bar().template("{wide_bar} {bytes}/{total_bytes}"))
+            },
+            None => {
+                bar.set_length(!0);
+                bar.set_style(ProgressStyle::default_spinner())
+            }
+        }
+        bar.set_position(0);
+        let mut f = async_std::fs::File::create(file).await.map_err(|e| TwistError::IOError(e))?;
+        while let Some(ch) = res.chunk().await.map_err(|e| TwistError::AccessError(e))? {
+            f.write_all(ch.chunk()).await.map_err(|e| TwistError::IOError(e))?;
+            bar.inc(ch.len() as u64);
+        }
+        f.flush().await.map_err(|e| TwistError::IOError(e))?;
+        Ok(())
+    }
+
+    async fn get_download_size(&self, url: &str) -> Result<usize, TwistError> {
+        let res = self.client.head(url)
+            .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
+            .header("Referer", "https://twist.moe/")
+            .timeout(Duration::from_secs(10))
+            .send().await
+            .and_then(|v| v.error_for_status())
+            .map_err(|e| TwistError::AccessError(e))?;
+        let size_str = res.headers().get("Content-Length").and_then(|v| v.to_str().ok())
+            .ok_or(TwistError::ParseError(String::from("no content length")))?;
+        let size_num: usize = size_str
+            .parse()
+            .map_err(|_| TwistError::ParseError(String::from("invalid content length")))?;
+        Ok(size_num)
+    }
+
+    async fn list_shows(&self) -> Result<Vec<(String, String)>, TwistError> {
+        let data = self.raw_api_request("https://twist.moe/api/anime").await?;
+        let mut ls = Vec::new();
+        let res: Option<_> = (|| {
+            for ent in data.as_array()? {
+                let ent_map = ent.as_object()?;
+                let name = String::from(ent_map.get("title")?.as_str()?);
+                let slug = ent_map.get("slug")?.as_object()?.get("slug")?.as_str()?;
+                ls.push((name, format!("https://twist.moe/a/{}", slug)));
+            }
+            Some(ls)
+        })();
+        res.ok_or(TwistError::ParseError(String::from("failed to parse anime list json")))
+    }
+
+    async fn get_show_downloads(&self, url: &str) -> Result<Vec<(String, String)>, TwistError> {
+        let stub = {
+            let mut tmp = url;
+            if tmp.ends_with('/') {
+                tmp = &tmp[..(tmp.len() - 1)];
+            }
+            match tmp.rfind('/') {
+                Some(idx) => &tmp[(idx + 1)..],
+                None => tmp
+            }
+        };
+
+        let url = format!("https://twist.moe/api/anime/{}/sources", stub);
+        let data = self.raw_api_request(url.as_str()).await?;
+
+        (|| {
+            let mut ls = Vec::new();
+            for ent in data.as_array()? {
+                let entv = ent.as_object()?;
+                let ob_source = entv.get("source")?.as_str()?;
+                let source = decrypt_source(ob_source).ok()?;
+                let file_name = {
+                    match source.rfind('/') {
+                        Some(idx) => String::from(&source.as_str()[(idx + 1)..]),
+                        None => source.clone()
+                    }
+                };
+                let quoted_source = format!("https://twistcdn.bunny.sh{}", urlencoding::encode(source.as_str()).replace("%2F", "/"));
+                ls.push((file_name, quoted_source));
+            }
+            Some(ls)
+        })().ok_or(TwistError::ParseError(String::from("failed to parse anime source json")))
+    }
 }
