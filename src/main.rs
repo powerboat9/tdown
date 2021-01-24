@@ -4,13 +4,16 @@ use serde_json::Value;
 use md5::Context;
 use openssl::symm::Cipher;
 use std::path::{Path, PathBuf};
-use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
-use reqwest::Client;
+use indicatif::{MultiProgress, ProgressStyle};
+use reqwest::{Client, Response};
 use std::time::Duration;
 use std::error::Error;
 use futures::AsyncWriteExt;
 use bytes::Buf;
 use reqwest::header::{USER_AGENT, REFERER};
+use pbr::{MultiBar, Units, Pipe, ProgressBar};
+use std::io::Stdout;
+use std::thread::spawn;
 
 extern crate clap;
 extern crate tokio;
@@ -67,30 +70,28 @@ async fn main() -> Result<(), TwistError> {
         let port = TwistPort::new()?;
         let show = submatch.value_of("SHOW").unwrap();
         let list = port.get_show_downloads(show).await?;
-        let progress = MultiProgress::new();
-        let show_bar = ProgressBar::new(list.len() as u64);
-        progress.add(show_bar.clone());
-        show_bar.tick();
-        let file_bar = ProgressBar::new(1);
-        progress.add(file_bar.clone());
-        file_bar.tick();
-        for e in show_bar.wrap_iter(list.iter()) {
-            port.download_file(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path(), file_bar.clone()).await.unwrap();
+        let m_bar = MultiBar::new();
+        let mut show_bar = m_bar.create_bar(list.len() as u64);
+        let mut down_bar = m_bar.create_bar(0);
+        down_bar.set_units(Units::Bytes);
+        spawn(move || m_bar.listen());
+        for e in list.iter() {
+            port.download_file(e.1.as_str(), PathBuf::from(e.0.as_str()).as_path(), &mut down_bar).await?;
+            show_bar.inc();
         }
-        file_bar.finish_and_clear();
-        show_bar.finish_and_clear();
+        down_bar.finish();
+        show_bar.finish();
     } else if let Some(submatch) = a.subcommand_matches("size") {
         let port = TwistPort::new()?;
         let show = submatch.value_of("SHOW").unwrap();
         let list = port.get_show_downloads(show).await?;
         let mut size_acc = 0;
-        let bar = ProgressBar::new(list.len() as u64);
+        let mut bar = ProgressBar::new(list.len() as u64);
         for e in list.iter()
             .map(|v| v.1.as_str())
-            .enumerate()
         {
-            bar.set_position(e.0 as u64 + 1);
-            size_acc += port.get_download_size(e.1).await?;
+            bar.inc();
+            size_acc += port.get_download_size(e).await?;
         }
         bar.finish();
         println!("Total: {}", size_to_string(size_acc))
@@ -213,44 +214,71 @@ impl TwistPort {
         }
     }
 
-    async fn download_file(&self, url: &str, file: &Path, bar: ProgressBar) -> Result<(), TwistError> {
-        let mut res = self.client.get(url)
-            .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
-            .header(REFERER, "https://twist.moe/")
-            .timeout(Duration::from_secs(10))
-            .send().await
-            .and_then(|v| v.error_for_status())
-            .map_err(|e| TwistError::AccessError(e))?;
+    async fn download_file(&self, url: &str, file: &Path, bar: &mut ProgressBar<Pipe>) -> Result<(), TwistError> {
+        async fn try_send(port: &TwistPort, url: &str) -> reqwest::Result<Response> {
+            let mut i = 0;
+            loop {
+                let v = port.client.get(url)
+                    .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
+                    .header(REFERER, "https://twist.moe/")
+                    .send().await;
+                match v {
+                    Ok(res) => {
+                        return res.error_for_status()
+                    },
+                    Err(e) => {
+                        println!("FAIL");
+                        i += 1;
+                        if i == 10 {
+                            return Err(e)
+                        }
+                    }
+                }
+            }
+        }
+        bar.set(0);
+        let mut res = try_send(self, url).await.map_err(|e| TwistError::AccessError(e))?;
         match res.headers().get("Content-Length")
             .and_then(|s| s.to_str().ok())
             .and_then(|s| s.parse().ok()) {
             Some(v) => {
-                bar.set_length(v);
-                bar.set_style(ProgressStyle::default_bar().template("{wide_bar} {bytes}/{total_bytes}"))
+                bar.total = v;
             },
             None => {
-                bar.set_length(!0);
-                bar.set_style(ProgressStyle::default_spinner())
+                bar.total = 0;
             }
-        }
-        bar.set_position(0);
+        };
         let mut f = async_std::fs::File::create(file).await.map_err(|e| TwistError::IOError(e))?;
         while let Some(ch) = res.chunk().await.map_err(|e| TwistError::AccessError(e))? {
             f.write_all(ch.chunk()).await.map_err(|e| TwistError::IOError(e))?;
-            bar.inc(ch.len() as u64);
+            bar.add(ch.len() as u64);
         }
         f.flush().await.map_err(|e| TwistError::IOError(e))?;
         Ok(())
     }
 
     async fn get_download_size(&self, url: &str) -> Result<usize, TwistError> {
-        let res = self.client.head(url)
-            .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
-            .header(REFERER, "https://twist.moe/")
-            .timeout(Duration::from_secs(10))
-            .send().await
-            .and_then(|v| v.error_for_status())
-            .map_err(|e| TwistError::AccessError(e))?;
+        async fn try_send(port: &TwistPort, url: &str) -> reqwest::Result<Response> {
+            let mut i = 0;
+            loop {
+                let v = port.client.head(url)
+                    .header(USER_AGENT, "Mozilla/5.0 (Windows NT 10.0; rv:78.0) Gecko/20100101 Firefox/78.0")
+                    .header(REFERER, "https://twist.moe/")
+                    .send().await;
+                match v {
+                    Ok(res) => {
+                        return res.error_for_status()
+                    },
+                    Err(e) => {
+                        i += 1;
+                        if i == 10 {
+                            return Err(e)
+                        }
+                    }
+                }
+            }
+        }
+        let res = try_send(self, url).await.map_err(|e| TwistError::AccessError(e))?;
         let size_str = res.headers().get("Content-Length").and_then(|v| v.to_str().ok())
             .ok_or(TwistError::ParseError(String::from("no content length")))?;
         let size_num: usize = size_str
